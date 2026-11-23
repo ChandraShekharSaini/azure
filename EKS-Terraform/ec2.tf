@@ -1,83 +1,163 @@
+
 ###########################################################
-# UBUNTU 24.04 AMI
+# UBUNTU 24.04 IMAGE
 ###########################################################
 
-data "aws_ssm_parameter" "ubuntu_ami" {
-  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+data "azurerm_platform_image" "ubuntu_2404" {
+  location  = azurerm_resource_group.eks_rg.location
+  publisher = "Canonical"
+  offer     = "ubuntu-24_04-lts"
+  sku       = "server"
+  version   = "latest"
 }
 
 ###########################################################
-# UBUNTU ADMIN EC2 LAUNCH TEMPLATE
+# ADMIN VM USER ASSIGNED MANAGED IDENTITY
 ###########################################################
 
-resource "aws_launch_template" "eks_admin_lt" {
-
-  name = "eks-admin-ubuntu-launch-template"
-
-  image_id = data.aws_ssm_parameter.ubuntu_ami.value
-
-  instance_type = "t3.medium"
-
-  vpc_security_group_ids = [
-    aws_security_group.allow_all.id
-  ]
-
-  iam_instance_profile {
-    name = aws_iam_instance_profile.eks_admin_profile.name
-  }
-
-  block_device_mappings {
-    device_name = "/dev/sda1"
-
-    ebs {
-      volume_size           = 50
-      volume_type           = "gp3"
-      encrypted             = true
-      delete_on_termination = true
-    }
-  }
-
-  metadata_options {
-    http_endpoint = "enabled"
-    http_tokens   = "required"
-  }
-
-  tag_specifications {
-    resource_type = "instance"
-
-    tags = {
-      Name        = "eks-admin-ubuntu"
-      Environment = "dev"
-      Project     = "eks-project"
-    }
-  }
+resource "azurerm_user_assigned_identity" "eks_admin" {
+  name                = "aks-admin-managed-identity"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
   tags = {
-    Name = "eks-admin-ubuntu-launch-template"
+    Name        = "aks-admin-identity"
+    Environment = "dev"
+    Project     = "aks-project"
   }
 }
 
+###########################################################
+# AKS CLUSTER USER ROLE
+###########################################################
+
+resource "azurerm_role_assignment" "admin_user" {
+  scope                = azurerm_kubernetes_cluster.aks.id
+  role_definition_name = "Azure Kubernetes Service Cluster User Role"
+
+  principal_id   = azurerm_user_assigned_identity.eks_admin.principal_id
+  principal_type = "ServicePrincipal"
+}
 
 ###########################################################
-# ADMIN EC2
+# AKS CLUSTER ADMIN ROLE
 ###########################################################
-resource "aws_instance" "eks" {
 
-  subnet_id = aws_subnet.public1.id
+resource "azurerm_role_assignment" "admin_cluster" {
+  scope                = azurerm_kubernetes_cluster.aks.id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
 
-  launch_template {
-    id = aws_launch_template.eks_admin_lt.id
+  principal_id   = azurerm_user_assigned_identity.eks_admin.principal_id
+  principal_type = "ServicePrincipal"
+}
 
-    version = aws_launch_template.eks_admin_lt.latest_version
+###########################################################
+# ADMIN VM PUBLIC IP
+###########################################################
+
+resource "azurerm_public_ip" "eks_admin_ip" {
+  name                = "aks-admin-public-ip"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  allocation_method = "Static"
+  sku               = "Standard"
+
+  tags = {
+    Name = "aks-admin-public-ip"
+  }
+}
+
+###########################################################
+# ADMIN VM NETWORK INTERFACE
+###########################################################
+
+resource "azurerm_network_interface" "eks_admin_nic" {
+  name                = "aks-admin-nic"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.public1.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.eks_admin_ip.id
+  }
+}
+
+###########################################################
+# UBUNTU ADMIN VM
+###########################################################
+
+resource "azurerm_linux_virtual_machine" "eks_admin" {
+
+  name                = "aks-admin-ubuntu"
+  computer_name       = "aks-admin"
+  resource_group_name = azurerm_resource_group.eks_rg.name
+  location            = azurerm_resource_group.eks_rg.location
+
+  size = "Standard_D2s_v3"
+
+  admin_username = var.admin_username
+
+  network_interface_ids = [
+    azurerm_network_interface.eks_admin_nic.id
+  ]
+
+  disable_password_authentication = true
+
+  #########################################################
+  # SSH KEY
+  #########################################################
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = file(pathexpand(var.admin_ssh_public_key))
   }
 
-  user_data = base64encode(<<-EOF
+  #########################################################
+  # UBUNTU IMAGE
+  #########################################################
+
+  source_image_id = data.azurerm_platform_image.ubuntu_2404.id
+
+  #########################################################
+  # OS DISK
+  #########################################################
+
+  os_disk {
+    name                 = "aks-admin-os-disk"
+    caching              = "ReadWrite"
+    storage_account_type = "Premium_LRS"
+    disk_size_gb         = 50
+  }
+
+  #########################################################
+  # MANAGED IDENTITY
+  #########################################################
+
+  identity {
+    type = "UserAssigned"
+
+    identity_ids = [
+      azurerm_user_assigned_identity.eks_admin.id
+    ]
+  }
+
+  #########################################################
+  # USER DATA / CLOUD INIT
+  #########################################################
+
+  custom_data = base64encode(<<-EOF
 #!/bin/bash
 
 set -euxo pipefail
 
-exec > /var/log/eks-admin-setup.log 2>&1
+exec > /var/log/aks-admin-setup.log 2>&1
 
+echo "Starting AKS Admin VM setup"
+
+# Update packages
 apt-get update -y
 
 apt-get install -y \
@@ -85,56 +165,79 @@ apt-get install -y \
   unzip \
   tar \
   gzip \
-  jq
+  jq \
+  ca-certificates \
+  apt-transport-https \
+  gnupg \
+  lsb-release
 
-# Install AWS CLI
-curl -fL \
-  https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip \
-  -o /tmp/awscliv2.zip
+###########################################################
+# INSTALL AZURE CLI
+###########################################################
 
-unzip -q /tmp/awscliv2.zip -d /tmp
+curl -sL https://aka.ms/InstallAzureCLIDeb | bash
 
-/tmp/aws/install
+az version
 
-# Install kubectl
-KUBECTL_VERSION="v1.35.0"
+###########################################################
+# INSTALL KUBECTL AND KUBELOGIN
+###########################################################
 
-curl -fL \
-  "https://dl.k8s.io/release/$${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
-  -o /tmp/kubectl
+az aks install-cli \
+  --install-location /usr/local/bin/kubectl \
+  --kubelogin-install-location /usr/local/bin/kubelogin
 
-install -m 0755 /tmp/kubectl /usr/local/bin/kubectl
+kubectl version --client
 
-# Install eksctl
-curl -fL \
-  https://github.com/eksctl-io/eksctl/releases/latest/download/eksctl_linux_amd64.tar.gz \
-  -o /tmp/eksctl.tar.gz
+kubelogin --version
 
-tar -xzf /tmp/eksctl.tar.gz -C /tmp
+###########################################################
+# INSTALL HELM
+###########################################################
 
-install -m 0755 /tmp/eksctl /usr/local/bin/eksctl
+curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
-# Configure AWS region
-export AWS_DEFAULT_REGION=us-east-1
+helm version
 
-# Wait for EKS cluster
-until aws eks describe-cluster \
-  --name chandra \
-  --region us-east-1 >/dev/null 2>&1
+###########################################################
+# CONFIGURE AZURE REGION
+###########################################################
+
+export ARM_LOCATION="${azurerm_resource_group.eks_rg.location}"
+
+###########################################################
+# MANAGED IDENTITY DETAILS
+###########################################################
+
+UAMI_CLIENT_ID="${azurerm_user_assigned_identity.eks_admin.client_id}"
+
+###########################################################
+# LOGIN USING MANAGED IDENTITY
+###########################################################
+
+until az login \
+  --identity \
+  --client-id "$UAMI_CLIENT_ID" \
+  --output none
 do
   sleep 20
 done
 
-# Wait for ACTIVE
+###########################################################
+# WAIT FOR AKS CLUSTER
+###########################################################
+
 while true; do
 
-  STATUS=$(aws eks describe-cluster \
-    --name chandra \
-    --region us-east-1 \
-    --query 'cluster.status' \
-    --output text)
+  STATUS=$(az aks show \
+    --resource-group "${azurerm_resource_group.eks_rg.name}" \
+    --name "${azurerm_kubernetes_cluster.aks.name}" \
+    --query provisioningState \
+    --output tsv 2>/dev/null || echo "NotFound")
 
-  if [ "$STATUS" = "ACTIVE" ]; then
+  echo "AKS Status: $STATUS"
+
+  if [ "$STATUS" = "Succeeded" ]; then
     break
   fi
 
@@ -142,36 +245,76 @@ while true; do
 
 done
 
-# Configure kubeconfig
+###########################################################
+# CONFIGURE KUBECONFIG
+###########################################################
+
 mkdir -p /root/.kube
 
-aws eks update-kubeconfig \
-  --name chandra \
-  --region us-east-1 \
-  --kubeconfig /root/.kube/config
+az aks get-credentials \
+  --resource-group "${azurerm_resource_group.eks_rg.name}" \
+  --name "${azurerm_kubernetes_cluster.aks.name}" \
+  --overwrite-existing \
+  --file /root/.kube/config
 
 export KUBECONFIG=/root/.kube/config
 
-# Wait for Kubernetes nodes
+###########################################################
+# CONFIGURE MANAGED IDENTITY AUTHENTICATION
+###########################################################
+
+kubelogin convert-kubeconfig \
+  -l msi \
+  --client-id "$UAMI_CLIENT_ID"
+
+###########################################################
+# WAIT FOR KUBERNETES NODES
+###########################################################
+
 until kubectl get nodes >/dev/null 2>&1; do
+  echo "Waiting for AKS nodes..."
   sleep 15
 done
+
+###########################################################
+# DISPLAY CLUSTER INFORMATION
+###########################################################
 
 kubectl get nodes -o wide
 
 kubectl get pods -A
 
-echo "EKS Admin Ubuntu setup completed"
+kubectl get namespaces
+
+echo "AKS Admin Ubuntu setup completed"
 
 EOF
   )
 
   depends_on = [
-    aws_eks_access_policy_association.eks_admin
+    azurerm_role_assignment.admin_user,
+    azurerm_role_assignment.admin_cluster
   ]
 
   tags = {
-    Name = "eks-admin"
+    Name        = "aks-admin"
+    Environment = "dev"
+    Project     = "aks-project"
   }
 }
 
+###########################################################
+# OUTPUTS
+###########################################################
+
+output "aks_admin_public_ip" {
+  value = azurerm_public_ip.eks_admin_ip.ip_address
+}
+
+output "aks_admin_private_ip" {
+  value = azurerm_network_interface.eks_admin_nic.private_ip_address
+}
+
+output "aks_admin_identity_client_id" {
+  value = azurerm_user_assigned_identity.eks_admin.client_id
+}
