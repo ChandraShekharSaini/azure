@@ -1,751 +1,538 @@
+
+###########################################################
+# TERRAFORM AND AZURE PROVIDER
+###########################################################
+
 terraform {
+  required_version = ">= 1.5.0"
+
   required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 4.0"
     }
   }
 }
 
-provider "aws" {
-  region = "us-east-1"
+provider "azurerm" {
+  features {}
 }
 
-############################
+###########################################################
 # VARIABLES
-############################
+###########################################################
+
+variable "location" {
+  default = "East US"
+}
 
 variable "cluster_version" {
-  default = "1.35"
+  description = "AKS Kubernetes version. Leave empty to use Azure default."
+  type        = string
+  default     = null
 }
 
-variable "aws_region" {
-  default = "us-east-1"
+variable "admin_username" {
+  default = "azureadmin"
 }
 
-############################
-# VPC
-############################
-
-resource "aws_vpc" "eks_vpc" {
-  cidr_block           = "10.0.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = {
-    Name = "eks-vpc"
-  }
+variable "admin_ssh_public_key" {
+  description = "Path to your SSH public key"
+  type        = string
+  default     = "~/.ssh/id_rsa.pub"
 }
 
-############################
-# INTERNET GATEWAY
-############################
-
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.eks_vpc.id
-
-  tags = {
-    Name = "eks-igw"
-  }
-}
-
-############################
-# PUBLIC SUBNET 1
-############################
-
-resource "aws_subnet" "public1" {
-  vpc_id                  = aws_vpc.eks_vpc.id
-  cidr_block              = "10.0.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "eks-public-1"
-
-    "kubernetes.io/role/elb" = "1"
-  }
-}
-
-############################
-# PUBLIC SUBNET 2
-############################
-
-resource "aws_subnet" "public2" {
-  vpc_id                  = aws_vpc.eks_vpc.id
-  cidr_block              = "10.0.2.0/24"
-  availability_zone       = "us-east-1b"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "eks-public-2"
-
-    "kubernetes.io/role/elb" = "1"
-  }
-}
-
-############################
-# PRIVATE SUBNET 1
-############################
-
-resource "aws_subnet" "private1" {
-  vpc_id            = aws_vpc.eks_vpc.id
-  cidr_block        = "10.0.3.0/24"
-  availability_zone = "us-east-1a"
-
-  tags = {
-    Name = "eks-private-1"
-
-    "kubernetes.io/role/internal-elb" = "1"
-  }
-}
-
-############################
-# PRIVATE SUBNET 2
-############################
-
-resource "aws_subnet" "private2" {
-  vpc_id            = aws_vpc.eks_vpc.id
-  cidr_block        = "10.0.4.0/24"
-  availability_zone = "us-east-1b"
-
-  tags = {
-    Name = "eks-private-2"
-
-    "kubernetes.io/role/internal-elb" = "1"
-  }
-}
-
-############################
-# NAT ELASTIC IP
-############################
-
-resource "aws_eip" "nat" {
-  domain = "vpc"
-
-  tags = {
-    Name = "eks-nat-eip"
-  }
-}
-
-############################
-# NAT GATEWAY
-############################
-
-resource "aws_nat_gateway" "nat" {
-  allocation_id = aws_eip.nat.id
-  subnet_id     = aws_subnet.public1.id
-
-  depends_on = [
-    aws_internet_gateway.igw
-  ]
-
-  tags = {
-    Name = "eks-nat"
-  }
-}
-
-############################
-# PUBLIC ROUTE TABLE
-############################
-
-resource "aws_route_table" "public" {
-  vpc_id = aws_vpc.eks_vpc.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.igw.id
-  }
-
-  tags = {
-    Name = "eks-public-rt"
-  }
-}
-
-############################
-# PUBLIC ROUTE ASSOCIATION 1
-############################
-
-resource "aws_route_table_association" "pub1" {
-  subnet_id      = aws_subnet.public1.id
-  route_table_id = aws_route_table.public.id
-}
-
-############################
-# PUBLIC ROUTE ASSOCIATION 2
-############################
-
-resource "aws_route_table_association" "pub2" {
-  subnet_id      = aws_subnet.public2.id
-  route_table_id = aws_route_table.public.id
-}
-
-############################
-# PRIVATE ROUTE TABLE
-############################
-
-resource "aws_route_table" "private" {
-  vpc_id = aws_vpc.eks_vpc.id
-
-  route {
-    cidr_block     = "0.0.0.0/0"
-    nat_gateway_id = aws_nat_gateway.nat.id
-  }
-
-  tags = {
-    Name = "eks-private-rt"
-  }
-}
-
-############################
-# PRIVATE ROUTE ASSOCIATION 1
-############################
-
-resource "aws_route_table_association" "priv1" {
-  subnet_id      = aws_subnet.private1.id
-  route_table_id = aws_route_table.private.id
-}
-
-############################
-# PRIVATE ROUTE ASSOCIATION 2
-############################
-
-resource "aws_route_table_association" "priv2" {
-  subnet_id      = aws_subnet.private2.id
-  route_table_id = aws_route_table.private.id
-}
-
-############################
-# SECURITY GROUP
-############################
-
-resource "aws_security_group" "allow_all" {
-  name        = "allow-all-sg"
-  description = "Allow all inbound and outbound traffic"
-  vpc_id      = aws_vpc.eks_vpc.id
-
-  ingress {
-    description = "Allow all inbound"
-
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-
-    cidr_blocks = [
-      "0.0.0.0/0"
-    ]
-  }
-
-  egress {
-    description = "Allow all outbound"
-
-    from_port = 0
-    to_port   = 0
-    protocol  = "-1"
-
-    cidr_blocks = [
-      "0.0.0.0/0"
-    ]
-  }
-
-  tags = {
-    Name = "allow-all-sg"
-  }
+variable "admin_ssh_source_cidr" {
+  description = "Your public IP CIDR for SSH access"
+  type        = string
 }
 
 ###########################################################
-# EKS CLUSTER IAM ROLE
+# RESOURCE GROUP
 ###########################################################
 
-resource "aws_iam_role" "cluster_role" {
-  name = "eks-cluster-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Effect = "Allow"
-
-        Principal = {
-          Service = "eks.amazonaws.com"
-        }
-
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
+resource "azurerm_resource_group" "eks_rg" {
+  name     = "chandra-aks-rg"
+  location = var.location
 
   tags = {
-    Name = "eks-cluster-role"
-  }
-}
-
-############################
-# EKS CLUSTER POLICY
-############################
-
-resource "aws_iam_role_policy_attachment" "cluster_policy" {
-  role = aws_iam_role.cluster_role.name
-
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-}
-
-###########################################################
-# EKS WORKER NODE IAM ROLE
-###########################################################
-
-resource "aws_iam_role" "worker_role" {
-  name = "eks-worker-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Effect = "Allow"
-
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-
-  tags = {
-    Name = "eks-worker-role"
-  }
-}
-
-############################
-# WORKER NODE POLICY
-############################
-
-resource "aws_iam_role_policy_attachment" "worker_node" {
-  role = aws_iam_role.worker_role.name
-
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-}
-
-############################
-# CNI POLICY
-############################
-
-resource "aws_iam_role_policy_attachment" "cni" {
-  role = aws_iam_role.worker_role.name
-
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-}
-
-############################
-# ECR POLICY
-############################
-
-resource "aws_iam_role_policy_attachment" "ecr" {
-  role = aws_iam_role.worker_role.name
-
-  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-}
-
-###########################################################
-# EKS CLUSTER
-###########################################################
-
-resource "aws_eks_cluster" "eks" {
-  name = "chandra"
-
-  role_arn = aws_iam_role.cluster_role.arn
-
-  version = var.cluster_version
-
-  access_config {
-    authentication_mode = "API_AND_CONFIG_MAP"
-  }
-
-  vpc_config {
-    subnet_ids = [
-      aws_subnet.private1.id,
-      aws_subnet.private2.id
-    ]
-
-    endpoint_public_access = true
-  }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.cluster_policy
-  ]
-
-  tags = {
-    Name        = "chandra"
     Environment = "dev"
-    Project     = "eks-project"
-  }
-}
-
-###########################################################
-# EKS NODE DATA 
-###########################################################
-
-data "aws_ami" "ubuntu_eks" {
-  most_recent = true
-  owners      = ["099720109477"]
-
-  filter {
-    name   = "name"
-    values = [
-      "ubuntu-eks/k8s_1.35/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
-    ]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-
-  filter {
-    name   = "state"
-    values = ["available"]
-  }
-}
-
-###########################################################
-# EKS WORKER LAUNCH TEMPLATE
-###########################################################
-
-resource "aws_launch_template" "eks_node_template" {
-
-  name = "chandra-eks-ubuntu-template"
-
-  image_id      = data.aws_ami.ubuntu_eks.id
-  instance_type = "t3.medium"
-
-  block_device_mappings {
-    device_name = "/dev/sda1"
-
-    ebs {
-      volume_size           = 50
-      volume_type           = "gp3"
-      encrypted             = true
-      delete_on_termination = true
-    }
-  }
-
-  user_data = base64encode(<<-EOF
-#!/bin/bash
-set -euxo pipefail
-
-# Join Ubuntu EKS worker to cluster
-/etc/eks/bootstrap.sh chandra
-EOF
-  )
-
-  tag_specifications {
-    resource_type = "instance"
-
-    tags = {
-      Name        = "chandra-ubuntu-worker"
-      Environment = "dev"
-      Project     = "eks-project"
-    }
-  }
-
-  tags = {
-    Name = "chandra-eks-ubuntu-template"
-  }
-}
-
-###########################################################
-# EKS NODE GROUP
-###########################################################
-
-resource "aws_eks_node_group" "node_group" {
-
-  cluster_name    = aws_eks_cluster.eks.name
-  node_group_name = "eks-ubuntu-node-group"
-  node_role_arn   = aws_iam_role.worker_role.arn
-
-  subnet_ids = [
-    aws_subnet.private1.id,
-    aws_subnet.private2.id
-  ]
-
-  launch_template {
-    id      = aws_launch_template.eks_node_template.id
-    version = aws_launch_template.eks_node_template.latest_version
-  }
-
-  scaling_config {
-    desired_size = 2
-    max_size     = 6
-    min_size     = 1
-  }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.worker_node,
-    aws_iam_role_policy_attachment.cni,
-    aws_iam_role_policy_attachment.ecr
-  ]
-
-  tags = {
-    Name        = "eks-node"
-    Environment = "dev"
-    Project     = "eks-project"
+    Project     = "aks-project"
     Owner       = "chandraops"
   }
 }
 
-
 ###########################################################
-# EKS ADDON - VPC CNI
-###########################################################
-
-resource "aws_eks_addon" "vpc_cni" {
-  cluster_name                = aws_eks_cluster.eks.name
-  addon_name                  = "vpc-cni"
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [
-    aws_eks_node_group.node_group
-  ]
-}
-
-###########################################################
-# EKS ADDON - COREDNS
+# VIRTUAL NETWORK
 ###########################################################
 
-resource "aws_eks_addon" "coredns" {
-  cluster_name = aws_eks_cluster.eks.name
-
-  addon_name = "coredns"
-
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [
-    aws_eks_node_group.node_group
-  ]
-}
-
-###########################################################
-# EKS ADDON - KUBE PROXY
-###########################################################
-
-resource "aws_eks_addon" "kube_proxy" {
-  cluster_name = aws_eks_cluster.eks.name
-
-  addon_name = "kube-proxy"
-
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [
-    aws_eks_node_group.node_group
-  ]
-}
-
-###########################################################
-# EKS POD IDENTITY AGENT
-###########################################################
-
-resource "aws_eks_addon" "pod_identity" {
-  cluster_name = aws_eks_cluster.eks.name
-
-  addon_name = "eks-pod-identity-agent"
-
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [
-    aws_eks_node_group.node_group
-  ]
-}
-
-###########################################################
-# EBS CSI IAM ROLE
-###########################################################
-
-resource "aws_iam_role" "ebs_csi_role" {
-  name = "AmazonEKS_EBS_CSI_DriverRole"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Effect = "Allow"
-
-        Principal = {
-          Service = "pods.eks.amazonaws.com"
-        }
-
-        Action = [
-          "sts:AssumeRole",
-          "sts:TagSession"
-        ]
-      }
-    ]
-  })
+resource "azurerm_virtual_network" "eks_vnet" {
+  name                = "aks-vnet"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+  address_space       = ["10.0.0.0/16"]
 
   tags = {
-    Name = "AmazonEKS_EBS_CSI_DriverRole"
+    Name = "aks-vnet"
   }
 }
 
 ###########################################################
-# EBS CSI POLICY
+# PUBLIC SUBNET 1
 ###########################################################
 
-resource "aws_iam_role_policy_attachment" "ebs_csi_policy" {
-  role = aws_iam_role.ebs_csi_role.name
-
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
+resource "azurerm_subnet" "public1" {
+  name                 = "aks-public-1"
+  resource_group_name  = azurerm_resource_group.eks_rg.name
+  virtual_network_name = azurerm_virtual_network.eks_vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
 }
 
 ###########################################################
-# EBS CSI POD IDENTITY
+# PUBLIC SUBNET 2
 ###########################################################
 
-resource "aws_eks_pod_identity_association" "ebs_csi" {
-  cluster_name = aws_eks_cluster.eks.name
-
-  namespace = "kube-system"
-
-  service_account = "ebs-csi-controller-sa"
-
-  role_arn = aws_iam_role.ebs_csi_role.arn
-
-  depends_on = [
-    aws_eks_addon.pod_identity,
-    aws_iam_role_policy_attachment.ebs_csi_policy
-  ]
+resource "azurerm_subnet" "public2" {
+  name                 = "aks-public-2"
+  resource_group_name  = azurerm_resource_group.eks_rg.name
+  virtual_network_name = azurerm_virtual_network.eks_vnet.name
+  address_prefixes     = ["10.0.2.0/24"]
 }
 
 ###########################################################
-# EBS CSI DRIVER
+# PRIVATE SUBNET 1
 ###########################################################
 
-resource "aws_eks_addon" "ebs_csi" {
-  cluster_name = aws_eks_cluster.eks.name
-
-  addon_name = "aws-ebs-csi-driver"
-
-  resolve_conflicts_on_update = "OVERWRITE"
-
-  depends_on = [
-    aws_eks_node_group.node_group,
-    aws_eks_pod_identity_association.ebs_csi
-  ]
+resource "azurerm_subnet" "private1" {
+  name                 = "aks-private-1"
+  resource_group_name  = azurerm_resource_group.eks_rg.name
+  virtual_network_name = azurerm_virtual_network.eks_vnet.name
+  address_prefixes     = ["10.0.3.0/24"]
 }
 
 ###########################################################
-# IAM ROLE FOR ADMIN EC2
+# PRIVATE SUBNET 2
 ###########################################################
 
-resource "aws_iam_role" "eks_admin_role" {
-  name = "eks-admin-ec2-role"
+resource "azurerm_subnet" "private2" {
+  name                 = "aks-private-2"
+  resource_group_name  = azurerm_resource_group.eks_rg.name
+  virtual_network_name = azurerm_virtual_network.eks_vnet.name
+  address_prefixes     = ["10.0.4.0/24"]
+}
 
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
+###########################################################
+# NAT PUBLIC IP
+###########################################################
 
-    Statement = [
-      {
-        Effect = "Allow"
+resource "azurerm_public_ip" "nat_ip" {
+  name                = "aks-nat-public-ip"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
+  allocation_method = "Static"
+  sku               = "Standard"
 
   tags = {
-    Name = "eks-admin-ec2-role"
+    Name = "aks-nat-ip"
   }
 }
 
 ###########################################################
-# EKS ADMIN POLICY
+# NAT GATEWAY
 ###########################################################
 
-resource "aws_iam_role_policy_attachment" "eks_admin_policy" {
-  role = aws_iam_role.eks_admin_role.name
+resource "azurerm_nat_gateway" "nat" {
+  name                = "aks-nat-gateway"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
-  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
+  sku_name                = "Standard"
+  idle_timeout_in_minutes = 10
+}
+
+resource "azurerm_nat_gateway_public_ip_association" "nat_ip" {
+  nat_gateway_id       = azurerm_nat_gateway.nat.id
+  public_ip_address_id = azurerm_public_ip.nat_ip.id
 }
 
 ###########################################################
-# EKS DESCRIBE POLICY
+# NAT GATEWAY SUBNET ASSOCIATIONS
 ###########################################################
 
-resource "aws_iam_role_policy" "eks_describe" {
-  name = "eks-describe"
+resource "azurerm_subnet_nat_gateway_association" "private1" {
+  subnet_id      = azurerm_subnet.private1.id
+  nat_gateway_id = azurerm_nat_gateway.nat.id
+}
 
-  role = aws_iam_role.eks_admin_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-
-    Statement = [
-      {
-        Effect = "Allow"
-
-        Action = [
-          "eks:DescribeCluster",
-          "eks:ListClusters",
-          "eks:AccessKubernetesApi"
-        ]
-
-        Resource = "*"
-      }
-    ]
-  })
+resource "azurerm_subnet_nat_gateway_association" "private2" {
+  subnet_id      = azurerm_subnet.private2.id
+  nat_gateway_id = azurerm_nat_gateway.nat.id
 }
 
 ###########################################################
-# EC2 INSTANCE PROFILE
+# NETWORK SECURITY GROUP
 ###########################################################
 
-resource "aws_iam_instance_profile" "eks_admin_profile" {
-  name = "eks-admin-ec2-profile"
+resource "azurerm_network_security_group" "aks_nsg" {
+  name                = "aks-nsg"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
-  role = aws_iam_role.eks_admin_role.name
+  security_rule {
+    name                       = "AllowSSH"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "22"
+    source_address_prefix      = var.admin_ssh_source_cidr
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "AllowHTTPS"
+    priority                   = 110
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "AllowHTTP"
+    priority                   = 120
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "80"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  tags = {
+    Name = "aks-nsg"
+  }
 }
 
 ###########################################################
-# EKS ACCESS ENTRY FOR ADMIN EC2
+# NSG SUBNET ASSOCIATIONS
 ###########################################################
 
-resource "aws_eks_access_entry" "eks_admin" {
-  cluster_name = aws_eks_cluster.eks.name
+resource "azurerm_subnet_network_security_group_association" "private1" {
+  subnet_id                 = azurerm_subnet.private1.id
+  network_security_group_id = azurerm_network_security_group.aks_nsg.id
+}
 
-  principal_arn = aws_iam_role.eks_admin_role.arn
+resource "azurerm_subnet_network_security_group_association" "private2" {
+  subnet_id                 = azurerm_subnet.private2.id
+  network_security_group_id = azurerm_network_security_group.aks_nsg.id
+}
 
-  type = "STANDARD"
-
-  depends_on = [
-    aws_eks_cluster.eks
-  ]
+resource "azurerm_subnet_network_security_group_association" "public1" {
+  subnet_id                 = azurerm_subnet.public1.id
+  network_security_group_id = azurerm_network_security_group.aks_nsg.id
 }
 
 ###########################################################
-# EKS ADMIN ACCESS POLICY
+# AKS CLUSTER
 ###########################################################
 
-resource "aws_eks_access_policy_association" "eks_admin" {
-  cluster_name = aws_eks_cluster.eks.name
+resource "azurerm_kubernetes_cluster" "aks" {
+  name                = "chandra"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+  dns_prefix          = "chandra-aks"
 
-  principal_arn = aws_iam_role.eks_admin_role.arn
+  kubernetes_version = var.cluster_version
 
-  policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+  sku_tier = "Free"
 
-  access_scope {
-    type = "cluster"
+  role_based_access_control_enabled = true
+  local_account_disabled            = true
+
+  #########################################################
+  # SYSTEM NODE POOL
+  #########################################################
+
+  default_node_pool {
+    name           = "systempool"
+    vm_size        = "Standard_D2s_v3"
+    vnet_subnet_id = azurerm_subnet.private1.id
+
+    auto_scaling_enabled = true
+
+    min_count = 1
+    max_count = 6
+
+    os_sku    = "Ubuntu"
+    os_disk_size_gb = 50
+    max_pods  = 30
+
+    tags = {
+      Environment = "dev"
+      Project     = "aks-project"
+    }
+  }
+
+  #########################################################
+  # MANAGED IDENTITY
+  #########################################################
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  #########################################################
+  # NETWORK PROFILE
+  #########################################################
+
+  network_profile {
+    network_plugin      = "azure"
+    network_plugin_mode = "overlay"
+    network_policy      = "azure"
+
+    outbound_type = "userAssignedNATGateway"
+
+    service_cidr   = "10.2.0.0/16"
+    dns_service_ip = "10.2.0.10"
+    pod_cidr       = "10.244.0.0/16"
+
+    load_balancer_sku = "standard"
+  }
+
+  #########################################################
+  # WORKLOAD IDENTITY
+  #########################################################
+
+  oidc_issuer_enabled       = true
+  workload_identity_enabled = true
+
+  #########################################################
+  # AZURE RBAC
+  #########################################################
+
+  azure_active_directory_role_based_access_control {
+    azure_rbac_enabled = true
+  }
+
+  tags = {
+    Name        = "chandra"
+    Environment = "dev"
+    Project     = "aks-project"
   }
 
   depends_on = [
-    aws_eks_access_entry.eks_admin
+    azurerm_subnet_nat_gateway_association.private1,
+    azurerm_subnet_nat_gateway_association.private2,
+    azurerm_subnet_network_security_group_association.private1,
+    azurerm_subnet_network_security_group_association.private2
   ]
 }
 
+###########################################################
+# AKS NETWORK CONTRIBUTOR PERMISSION
+###########################################################
 
+resource "azurerm_role_assignment" "aks_network" {
+  scope                = azurerm_subnet.private1.id
+  role_definition_name = "Network Contributor"
+  principal_id         = azurerm_kubernetes_cluster.aks.identity[0].principal_id
+}
 
+resource "azurerm_role_assignment" "aks_network2" {
+  scope                = azurerm_subnet.private2.id
+  role_definition_name = "Network Contributor"
+  principal_id         = azurerm_kubernetes_cluster.aks.identity[0].principal_id
+}
+
+###########################################################
+# ADDITIONAL AKS NODE POOL
+###########################################################
+
+resource "azurerm_kubernetes_cluster_node_pool" "worker" {
+  name                  = "workerpool"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.aks.id
+
+  vm_size        = "Standard_D2s_v3"
+  vnet_subnet_id = azurerm_subnet.private2.id
+
+  auto_scaling_enabled = true
+
+  min_count = 1
+  max_count = 6
+
+  os_type = "Linux"
+  os_sku  = "Ubuntu"
+
+  os_disk_size_gb = 50
+  max_pods         = 30
+
+  node_labels = {
+    role        = "worker"
+    environment = "dev"
+  }
+
+  tags = {
+    Name        = "aks-worker"
+    Environment = "dev"
+    Project     = "aks-project"
+    Owner       = "chandraops"
+  }
+
+  depends_on = [
+    azurerm_role_assignment.aks_network2
+  ]
+}
+
+###########################################################
+# ADMIN VM PUBLIC IP
+###########################################################
+
+resource "azurerm_public_ip" "admin_ip" {
+  name                = "aks-admin-public-ip"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  allocation_method = "Static"
+  sku               = "Standard"
+}
+
+###########################################################
+# ADMIN VM NETWORK INTERFACE
+###########################################################
+
+resource "azurerm_network_interface" "admin_nic" {
+  name                = "aks-admin-nic"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.public1.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.admin_ip.id
+  }
+}
+
+###########################################################
+# ADMIN VM
+###########################################################
+
+resource "azurerm_linux_virtual_machine" "admin" {
+  name                = "aks-admin-vm"
+  resource_group_name = azurerm_resource_group.eks_rg.name
+  location            = azurerm_resource_group.eks_rg.location
+
+  size = "Standard_B2s"
+
+  admin_username = var.admin_username
+
+  network_interface_ids = [
+    azurerm_network_interface.admin_nic.id
+  ]
+
+  disable_password_authentication = true
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = file(pathexpand(var.admin_ssh_public_key))
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = "Standard_LRS"
+    disk_size_gb         = 30
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"
+  }
+
+  #########################################################
+  # SYSTEM ASSIGNED IDENTITY
+  #########################################################
+
+  identity {
+    type = "SystemAssigned"
+  }
+
+  custom_data = base64encode(<<-EOF
+#!/bin/bash
+set -eux
+
+apt-get update
+apt-get install -y ca-certificates curl apt-transport-https gnupg lsb-release
+
+# Install Azure CLI
+curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+# Install kubectl
+az aks install-cli
+EOF
+  )
+
+  tags = {
+    Name = "aks-admin-vm"
+  }
+}
+
+###########################################################
+# ADMIN VM AKS USER ACCESS
+###########################################################
+
+resource "azurerm_role_assignment" "admin_user" {
+  scope                = azurerm_kubernetes_cluster.aks.id
+  role_definition_name = "Azure Kubernetes Service Cluster User Role"
+  principal_id         = azurerm_linux_virtual_machine.admin.identity[0].principal_id
+}
+
+###########################################################
+# ADMIN VM AKS CLUSTER ADMIN ACCESS
+###########################################################
+
+resource "azurerm_role_assignment" "admin_cluster" {
+  scope                = azurerm_kubernetes_cluster.aks.id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+  principal_id         = azurerm_linux_virtual_machine.admin.identity[0].principal_id
+}
+
+###########################################################
+# OUTPUTS
+###########################################################
+
+output "resource_group" {
+  value = azurerm_resource_group.eks_rg.name
+}
+
+output "aks_cluster_name" {
+  value = azurerm_kubernetes_cluster.aks.name
+}
+
+output "aks_cluster_id" {
+  value = azurerm_kubernetes_cluster.aks.id
+}
+
+output "aks_node_resource_group" {
+  value = azurerm_kubernetes_cluster.aks.node_resource_group
+}
+
+output "aks_oidc_issuer_url" {
+  value = azurerm_kubernetes_cluster.aks.oidc_issuer_url
+}
+
+output "admin_vm_public_ip" {
+  value = azurerm_public_ip.admin_ip.ip_address
+}
+
+output "nat_public_ip" {
+  value = azurerm_public_ip.nat_ip.ip_address
+}
