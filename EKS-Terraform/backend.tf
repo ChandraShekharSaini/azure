@@ -1,8 +1,10 @@
 terraform {
-  backend "s3" {
-    bucket       = "aws-statefile-bucket-v1111"
-    key          = "terraform.tfstate"
-    region       = "us-east-1"
-    use_lockfile = true
+  backend "azurerm" {
+    resource_group_name  = "terraform-state-rg"
+    storage_account_name = "chandratfstate123"
+    container_name       = "tfstate"
+    key                  = "terraform.tfstate"
+
+    use_azuread_auth = true
   }
 }
