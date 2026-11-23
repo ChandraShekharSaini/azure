@@ -1,95 +1,190 @@
 ###########################################################
-# RDS SECURITY GROUP
+# MYSQL DELEGATED SUBNET
 ###########################################################
 
-resource "aws_security_group" "rds_sg" {
-  name        = "rds-mysql-sg"
-  description = "Allow MySQL access from EKS"
-  vpc_id      = aws_vpc.eks_vpc.id
+resource "azurerm_subnet" "mysql_subnet" {
+  name                 = "mysql-private-subnet"
+  resource_group_name  = azurerm_resource_group.eks_rg.name
+  virtual_network_name = azurerm_virtual_network.eks_vnet.name
 
-  ingress {
-    description = "MySQL from EKS VPC"
-    from_port   = 3306
-    to_port     = 3306
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  address_prefixes = ["10.0.5.0/24"]
 
-  egress {
-    description = "Allow outbound traffic"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  delegation {
+    name = "mysql-delegation"
 
-  tags = {
-    Name = "rds-mysql-sg"
+    service_delegation {
+      name = "Microsoft.DBforMySQL/flexibleServers"
+
+      actions = [
+        "Microsoft.Network/virtualNetworks/subnets/join/action"
+      ]
+    }
   }
 }
 
-
-
 ###########################################################
-# RDS SUBNET GROUP
+# MYSQL PRIVATE DNS ZONE
 ###########################################################
 
-resource "aws_db_subnet_group" "mysql" {
-  name = "shopping-mysql-subnet-group"
+resource "azurerm_private_dns_zone" "mysql_dns" {
+  name = "shopping-mysql.mysql.database.azure.com"
 
-  subnet_ids = [
-    aws_subnet.private1.id,
-    aws_subnet.private2.id
-  ]
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
   tags = {
-    Name = "shopping-mysql-subnet-group"
+    Name = "shopping-mysql-dns"
   }
 }
 
+###########################################################
+# MYSQL PRIVATE DNS VNET LINK
+###########################################################
+
+resource "azurerm_private_dns_zone_virtual_network_link" "mysql_dns_link" {
+  name = "shopping-mysql-vnet-link"
+
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  private_dns_zone_name = azurerm_private_dns_zone.mysql_dns.name
+
+  virtual_network_id = azurerm_virtual_network.eks_vnet.id
+
+  registration_enabled = false
+}
 
 ###########################################################
-# MYSQL RDS
+# MYSQL NETWORK SECURITY GROUP
 ###########################################################
 
-resource "aws_db_instance" "mysql" {
+resource "azurerm_network_security_group" "mysql_sg" {
+  name                = "mysql-private-nsg"
+  location            = azurerm_resource_group.eks_rg.location
+  resource_group_name = azurerm_resource_group.eks_rg.name
 
-  identifier = "shopping-mysql"
+  security_rule {
+    name                       = "AllowMySQLFromAKS"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
 
-  engine         = "mysql"
-  engine_version = "8.0"
+    source_port_range      = "*"
+    destination_port_range = "3306"
 
-  instance_class = "db.t3.micro"
+    source_address_prefix = "10.0.3.0/24"
 
-  allocated_storage     = 20
-  max_allocated_storage = 50
-  storage_type          = "gp3"
+    destination_address_prefix = "*"
+  }
 
-  db_name  = "cloud"
-  username = "admin"
-  password = "qazqaz1231"
+  security_rule {
+    name                       = "AllowOutbound"
+    priority                   = 100
+    direction                  = "Outbound"
+    access                     = "Allow"
+    protocol                   = "*"
 
-  port = 3306
+    source_port_range      = "*"
+    destination_port_range = "*"
 
-  db_subnet_group_name = aws_db_subnet_group.mysql.name
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
 
-  vpc_security_group_ids = [
-    aws_security_group.rds_sg.id
-  ]
+  tags = {
+    Name = "mysql-private-nsg"
+  }
+}
 
-  publicly_accessible = true
+###########################################################
+# MYSQL SUBNET NSG ASSOCIATION
+###########################################################
 
-  backup_retention_period = 7
+resource "azurerm_subnet_network_security_group_association" "mysql" {
+  subnet_id = azurerm_subnet.mysql_subnet.id
 
-  multi_az = false
+  network_security_group_id = azurerm_network_security_group.mysql_sg.id
+}
 
-  skip_final_snapshot = true
+###########################################################
+# MYSQL FLEXIBLE SERVER
+###########################################################
 
-  deletion_protection = false
+resource "azurerm_mysql_flexible_server" "mysql" {
+
+  name = "shopping-mysql-chandra"
+
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  location = azurerm_resource_group.eks_rg.location
+
+  administrator_login    = "admin"
+  administrator_password = var.mysql_password
+
+  version = "8.0.21"
+
+  sku_name = "B_Standard_B1ms"
+
+  delegated_subnet_id = azurerm_subnet.mysql_subnet.id
+
+  private_dns_zone_id = azurerm_private_dns_zone.mysql_dns.id
+
+  public_network_access = "Disabled"
+
+  backup_retention_days = 7
+
+  geo_redundant_backup_enabled = false
+
+  zone = "1"
+
+  storage {
+    size_gb           = 20
+    auto_grow_enabled = true
+    iops              = 360
+  }
 
   tags = {
     Name        = "shopping-mysql"
     Environment = "dev"
-    Project     = "eks-project"
+    Project     = "aks-project"
   }
+
+  depends_on = [
+    azurerm_private_dns_zone_virtual_network_link.mysql_dns_link,
+    azurerm_subnet_network_security_group_association.mysql
+  ]
+}
+
+###########################################################
+# MYSQL DATABASE
+###########################################################
+
+resource "azurerm_mysql_flexible_database" "cloud" {
+
+  name                = "cloud"
+  resource_group_name = azurerm_resource_group.eks_rg.name
+
+  server_name = azurerm_mysql_flexible_server.mysql.name
+
+  charset   = "utf8mb4"
+  collation = "utf8mb4_unicode_ci"
+}
+
+###########################################################
+# MYSQL OUTPUTS
+###########################################################
+
+output "mysql_server_name" {
+  value = azurerm_mysql_flexible_server.mysql.name
+}
+
+output "mysql_fqdn" {
+  value = azurerm_mysql_flexible_server.mysql.fqdn
+}
+
+output "mysql_database" {
+  value = azurerm_mysql_flexible_database.cloud.name
+}
+
+output "mysql_port" {
+  value = 3306 hard code valuer here
 }
